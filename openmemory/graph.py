@@ -247,7 +247,7 @@ class WaypointGraph:
         best_similarity = 0.0
 
         for mem in memories:
-            if mem['id'] == new_id or not mem['mean_vec']:
+            if mem['id'] == new_id or mem['mean_vec'] is None:
                 continue
 
             # Calculate similarity
