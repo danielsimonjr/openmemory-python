@@ -83,6 +83,45 @@ Or use with Claude Desktop (add to config):
 }
 ```
 
+## Security: model loading
+
+Hugging Face model repos can ship arbitrary `*.py` files that execute on
+load when `trust_remote_code` is enabled, and the legacy
+`pytorch_model.bin` format is a Python pickle and therefore an
+arbitrary-code-execution channel by itself. OpenMemory loads embedding
+models with hardened defaults:
+
+- `trust_remote_code=False` on every load, so no custom Python from the
+  model repo is ever executed.
+- Every default model is pinned to an audited commit SHA (see
+  `DEFAULT_REVISIONS` in `openmemory/embeddings.py`); an upstream tampered
+  or reuploaded weight cannot silently swap in.
+- `safetensors` weights are preferred via
+  `model_kwargs={"use_safetensors": True}`, removing the pickle attack
+  surface entirely. We fall back to legacy weights only when a repo has no
+  safetensors, and even then keep `trust_remote_code=False` and the pin.
+
+### Overriding the default model
+
+For air-gapped mirrors, vendored forks, or pinning to a different audited
+revision, set:
+
+| Env var                          | Effect                                                                 |
+| -------------------------------- | ---------------------------------------------------------------------- |
+| `OPENMEMORY_EMBEDDING_MODEL`     | Replaces the default model id (applies to every sector).               |
+| `OPENMEMORY_EMBEDDING_REVISION`  | Pins all loads to this commit SHA, overriding `DEFAULT_REVISIONS`.     |
+
+Example:
+
+```bash
+export OPENMEMORY_EMBEDDING_MODEL="my-org/audited-minilm"
+export OPENMEMORY_EMBEDDING_REVISION="c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+python -m openmemory.mcp.server
+```
+
+For per-sector control, pass an explicit `models` dict to
+`EmbeddingProvider` instead of using the env vars.
+
 ## Development
 
 ```bash
