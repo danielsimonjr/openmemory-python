@@ -6,6 +6,7 @@ Exposes memory operations via Model Context Protocol.
 import asyncio
 import json
 import sys
+import traceback
 from typing import Any, Dict
 from mcp.server.models import InitializationOptions
 from mcp.server import Server
@@ -172,6 +173,9 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> list[TextContent]:
             raise ValueError(f"Unknown tool: {name}")
 
     except Exception as e:
+        # Log the full traceback server-side (stderr — stdout carries the JSON-RPC
+        # stream) so failures are debuggable, then return a clean error to the client.
+        traceback.print_exc(file=sys.stderr)
         return [TextContent(
             type="text",
             text=json.dumps({"error": str(e)})

@@ -4,6 +4,7 @@ SQLite storage backend for OpenMemory
 import sqlite3
 import json
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 import numpy as np
@@ -23,10 +24,28 @@ class Storage:
         """
         self.db_path = db_path
         self.conn: Optional[sqlite3.Connection] = None
+        # All DB work runs on this single worker thread (see _run). A one-thread
+        # executor serializes access so the shared sqlite connection is never used
+        # by two threads at once — a sqlite3.Connection is not safe for concurrent
+        # cross-thread use even with check_same_thread=False.
+        self._db_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="openmemory-db"
+        )
         self._initialize_db()
+
+    async def _run(self, fn, *args):
+        """Run a blocking DB call on the dedicated single DB thread.
+
+        Replaces asyncio.to_thread (which uses the shared default pool and would
+        let concurrent coroutines touch the connection from different threads).
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._db_executor, fn, *args)
 
     def _initialize_db(self) -> None:
         """Initialize database schema"""
+        # check_same_thread=False: the connection is created here on the calling
+        # thread but used from the _db_executor worker thread via _run().
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
 
@@ -103,7 +122,7 @@ class Storage:
         segment: int = 0
     ) -> None:
         """Insert a new memory"""
-        await asyncio.to_thread(
+        await self._run(
             self.conn.execute,
             """
             INSERT INTO memories (
@@ -118,26 +137,26 @@ class Storage:
                 salience, decay_lambda, 1
             )
         )
-        await asyncio.to_thread(self.conn.commit)
+        await self._run(self.conn.commit)
 
     async def get_memory(self, memory_id: str) -> Optional[Dict]:
         """Get a memory by ID"""
-        cursor = await asyncio.to_thread(
+        cursor = await self._run(
             self.conn.execute,
             "SELECT * FROM memories WHERE id = ?",
             (memory_id,)
         )
-        row = await asyncio.to_thread(cursor.fetchone)
+        row = await self._run(cursor.fetchone)
         return dict(row) if row else None
 
     async def get_memory_by_simhash(self, simhash: str) -> Optional[Dict]:
         """Get a memory by simhash"""
-        cursor = await asyncio.to_thread(
+        cursor = await self._run(
             self.conn.execute,
             "SELECT * FROM memories WHERE simhash = ?",
             (simhash,)
         )
-        row = await asyncio.to_thread(cursor.fetchone)
+        row = await self._run(cursor.fetchone)
         return dict(row) if row else None
 
     async def update_memory_seen(
@@ -148,7 +167,7 @@ class Storage:
         updated_at: int
     ) -> None:
         """Update memory last seen and salience"""
-        await asyncio.to_thread(
+        await self._run(
             self.conn.execute,
             """
             UPDATE memories
@@ -157,7 +176,7 @@ class Storage:
             """,
             (last_seen_at, salience, updated_at, memory_id)
         )
-        await asyncio.to_thread(self.conn.commit)
+        await self._run(self.conn.commit)
 
     async def insert_vector(
         self,
@@ -169,21 +188,21 @@ class Storage:
         vec_bytes = vector.astype(np.float32).tobytes()
         dim = len(vector)
 
-        await asyncio.to_thread(
+        await self._run(
             self.conn.execute,
             "INSERT INTO vectors (id, sector, vec, dim) VALUES (?, ?, ?, ?)",
             (memory_id, sector, vec_bytes, dim)
         )
-        await asyncio.to_thread(self.conn.commit)
+        await self._run(self.conn.commit)
 
     async def get_vectors_by_sector(self, sector: str) -> List[Dict]:
         """Get all vectors for a sector"""
-        cursor = await asyncio.to_thread(
+        cursor = await self._run(
             self.conn.execute,
             "SELECT id, vec, dim FROM vectors WHERE sector = ?",
             (sector,)
         )
-        rows = await asyncio.to_thread(cursor.fetchall)
+        rows = await self._run(cursor.fetchall)
 
         results = []
         for row in rows:
@@ -199,12 +218,12 @@ class Storage:
 
     async def get_vectors_by_id(self, memory_id: str) -> List[Dict]:
         """Get all vectors for a memory"""
-        cursor = await asyncio.to_thread(
+        cursor = await self._run(
             self.conn.execute,
             "SELECT sector, vec, dim FROM vectors WHERE id = ?",
             (memory_id,)
         )
-        rows = await asyncio.to_thread(cursor.fetchall)
+        rows = await self._run(cursor.fetchall)
 
         results = []
         for row in rows:
@@ -227,12 +246,12 @@ class Storage:
         vec_bytes = mean_vec.astype(np.float32).tobytes()
         dim = len(mean_vec)
 
-        await asyncio.to_thread(
+        await self._run(
             self.conn.execute,
             "UPDATE memories SET mean_vec = ?, mean_vec_dim = ? WHERE id = ?",
             (vec_bytes, dim, memory_id)
         )
-        await asyncio.to_thread(self.conn.commit)
+        await self._run(self.conn.commit)
 
     async def insert_waypoint(
         self,
@@ -243,7 +262,7 @@ class Storage:
         updated_at: int
     ) -> None:
         """Insert or replace waypoint"""
-        await asyncio.to_thread(
+        await self._run(
             self.conn.execute,
             """
             INSERT OR REPLACE INTO waypoints (src_id, dst_id, weight, created_at, updated_at)
@@ -251,26 +270,26 @@ class Storage:
             """,
             (src_id, dst_id, weight, created_at, updated_at)
         )
-        await asyncio.to_thread(self.conn.commit)
+        await self._run(self.conn.commit)
 
     async def get_waypoint(self, src_id: str, dst_id: str) -> Optional[Dict]:
         """Get a specific waypoint"""
-        cursor = await asyncio.to_thread(
+        cursor = await self._run(
             self.conn.execute,
             "SELECT * FROM waypoints WHERE src_id = ? AND dst_id = ?",
             (src_id, dst_id)
         )
-        row = await asyncio.to_thread(cursor.fetchone)
+        row = await self._run(cursor.fetchone)
         return dict(row) if row else None
 
     async def get_waypoints_by_source(self, src_id: str) -> List[Dict]:
         """Get all waypoints from a source"""
-        cursor = await asyncio.to_thread(
+        cursor = await self._run(
             self.conn.execute,
             "SELECT * FROM waypoints WHERE src_id = ?",
             (src_id,)
         )
-        rows = await asyncio.to_thread(cursor.fetchall)
+        rows = await self._run(cursor.fetchall)
         return [dict(row) for row in rows]
 
     async def update_waypoint(
@@ -281,7 +300,7 @@ class Storage:
         updated_at: int
     ) -> None:
         """Update waypoint weight"""
-        await asyncio.to_thread(
+        await self._run(
             self.conn.execute,
             """
             UPDATE waypoints
@@ -290,22 +309,22 @@ class Storage:
             """,
             (weight, updated_at, src_id, dst_id)
         )
-        await asyncio.to_thread(self.conn.commit)
+        await self._run(self.conn.commit)
 
     async def prune_waypoints(self, threshold: float) -> int:
         """Remove waypoints below threshold"""
-        cursor = await asyncio.to_thread(
+        cursor = await self._run(
             self.conn.execute,
             "DELETE FROM waypoints WHERE weight < ?",
             (threshold,)
         )
         deleted = cursor.rowcount
-        await asyncio.to_thread(self.conn.commit)
+        await self._run(self.conn.commit)
         return deleted
 
     async def get_all_memories_with_vectors(self, limit: int = 1000) -> List[Dict]:
         """Get all memories with mean vectors"""
-        cursor = await asyncio.to_thread(
+        cursor = await self._run(
             self.conn.execute,
             """
             SELECT id, mean_vec, mean_vec_dim
@@ -315,7 +334,7 @@ class Storage:
             """,
             (limit,)
         )
-        rows = await asyncio.to_thread(cursor.fetchall)
+        rows = await self._run(cursor.fetchall)
 
         results = []
         for row in rows:
@@ -331,7 +350,7 @@ class Storage:
 
     async def get_all_memories(self, limit: int, offset: int = 0) -> List[Dict]:
         """Get all memories with pagination"""
-        cursor = await asyncio.to_thread(
+        cursor = await self._run(
             self.conn.execute,
             """
             SELECT * FROM memories
@@ -340,26 +359,26 @@ class Storage:
             """,
             (limit, offset)
         )
-        rows = await asyncio.to_thread(cursor.fetchall)
+        rows = await self._run(cursor.fetchall)
         return [dict(row) for row in rows]
 
     async def get_max_segment(self) -> int:
         """Get maximum segment number"""
-        cursor = await asyncio.to_thread(
+        cursor = await self._run(
             self.conn.execute,
             "SELECT MAX(segment) as max_seg FROM memories"
         )
-        row = await asyncio.to_thread(cursor.fetchone)
+        row = await self._run(cursor.fetchone)
         return row['max_seg'] if row and row['max_seg'] is not None else 0
 
     async def get_segment_count(self, segment: int) -> int:
         """Get count of memories in segment"""
-        cursor = await asyncio.to_thread(
+        cursor = await self._run(
             self.conn.execute,
             "SELECT COUNT(*) as c FROM memories WHERE segment = ?",
             (segment,)
         )
-        row = await asyncio.to_thread(cursor.fetchone)
+        row = await self._run(cursor.fetchone)
         return row['c'] if row else 0
 
     def close(self) -> None:
